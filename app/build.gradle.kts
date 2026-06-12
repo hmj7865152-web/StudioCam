@@ -48,9 +48,6 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
 
-    // ML Kit Selfie Segmentation (background removal)
-    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
-    implementation("com.google.android.gms:play-services-tasks:18.2.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
