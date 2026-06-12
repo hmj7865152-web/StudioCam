@@ -153,16 +153,16 @@ object ImageProcessor {
         val avgB = bSum.toFloat() / count
         val avgLum = lumSum.toFloat() / count
 
-        val targetLum = 180f
-        val brightnessShift = (targetLum - avgLum).coerceIn(-60f, 80f)
+        val targetLum = 150f
+        val brightnessShift = (targetLum - avgLum).coerceIn(-15f, 15f)
 
         val grayAvg = (avgR + avgG + avgB) / 3f
-        val rGain = (grayAvg / avgR).coerceIn(0.85f, 1.2f)
-        val gGain = (grayAvg / avgG).coerceIn(0.85f, 1.2f)
-        val bGain = (grayAvg / avgB).coerceIn(0.85f, 1.2f)
+        val rGain = (grayAvg / avgR).coerceIn(0.95f, 1.05f)
+        val gGain = (grayAvg / avgG).coerceIn(0.95f, 1.05f)
+        val bGain = (grayAvg / avgB).coerceIn(0.95f, 1.05f)
 
-        val contrast = 1.12f
-        val saturation = 1.08f
+        val contrast = 1.03f
+        val saturation = 1.0f
 
         val cm = ColorMatrix()
 
