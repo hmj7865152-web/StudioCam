@@ -6,77 +6,89 @@ import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
-import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.segmentation.Segmentation
-import com.google.mlkit.vision.segmentation.Segmenter
-import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
-import java.nio.ByteBuffer
+import kotlin.math.max
 
 /**
- * Handles background removal (ML Kit selfie segmentation) and
+ * Handles background removal (color/edge based, offline, no AI) and
  * auto lighting correction to approximate a "studio shot" look.
  */
 object ImageProcessor {
 
-    private val segmenter: Segmenter by lazy {
-        val options = SelfieSegmenterOptions.Builder()
-            .setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE)
-            .enableRawSizeMask()
-            .build()
-        Segmentation.getClient(options)
-    }
-
-    /**
-     * Full pipeline: auto lighting correction -> background removal ->
-     * composite onto solid white studio background.
-     */
     fun processToStudioLook(original: Bitmap): Bitmap {
         val lit = autoLightingCorrection(original)
         val mask = getForegroundMask(lit)
         return compositeOnWhite(lit, mask)
     }
 
-    /**
-     * Runs ML Kit selfie segmentation synchronously (blocking call,
-     * must be called from a background thread) and returns a
-     * confidence mask scaled to the bitmap's dimensions.
-     */
     private fun getForegroundMask(bitmap: Bitmap): FloatArray {
-        val image = InputImage.fromBitmap(bitmap, 0)
-        val task = segmenter.process(image)
-        val result = Tasks.await(task) // blocking - call from background thread
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        val maskBuffer: ByteBuffer = result.buffer
-        val maskWidth = result.width
-        val maskHeight = result.height
+        val sampleSize = max(1, minOf(width, height) / 20)
+        val bgColor = sampleBackgroundColor(pixels, width, height, sampleSize)
+        val bgR = Color.red(bgColor)
+        val bgG = Color.green(bgColor)
+        val bgB = Color.blue(bgColor)
 
-        maskBuffer.rewind()
-        val maskValues = FloatArray(maskWidth * maskHeight)
-        for (i in maskValues.indices) {
-            maskValues[i] = maskBuffer.float
-        }
+        val threshold = 40f
+        val softRange = 25f
 
-        // If mask resolution differs from bitmap, scale-sample it.
-        if (maskWidth == bitmap.width && maskHeight == bitmap.height) {
-            return maskValues
-        }
+        val mask = FloatArray(width * height)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val dr = Color.red(p) - bgR
+            val dg = Color.green(p) - bgG
+            val db = Color.blue(p) - bgB
+            val dist = kotlin.math.sqrt((dr * dr + dg * dg + db * db).toDouble()).toFloat()
 
-        val scaled = FloatArray(bitmap.width * bitmap.height)
-        for (y in 0 until bitmap.height) {
-            val srcY = (y * maskHeight / bitmap.height).coerceIn(0, maskHeight - 1)
-            for (x in 0 until bitmap.width) {
-                val srcX = (x * maskWidth / bitmap.width).coerceIn(0, maskWidth - 1)
-                scaled[y * bitmap.width + x] = maskValues[srcY * maskWidth + srcX]
+            mask[i] = when {
+                dist <= threshold -> 0f
+                dist >= threshold + softRange -> 1f
+                else -> (dist - threshold) / softRange
             }
         }
-        return scaled
+
+        return mask
     }
 
-    /**
-     * Composites the subject (using the confidence mask as alpha)
-     * onto a solid white background, producing the "studio" backdrop.
-     */
+    private fun sampleBackgroundColor(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        sampleSize: Int
+    ): Int {
+        var rSum = 0L
+        var gSum = 0L
+        var bSum = 0L
+        var count = 0
+
+        val regions = listOf(
+            0 to 0,
+            (width - sampleSize) to 0,
+            0 to (height - sampleSize),
+            (width - sampleSize) to (height - sampleSize)
+        )
+
+        for ((startX, startY) in regions) {
+            for (y in startY until startY + sampleSize) {
+                if (y < 0 || y >= height) continue
+                for (x in startX until startX + sampleSize) {
+                    if (x < 0 || x >= width) continue
+                    val p = pixels[y * width + x]
+                    rSum += Color.red(p)
+                    gSum += Color.green(p)
+                    bSum += Color.blue(p)
+                    count++
+                }
+            }
+        }
+
+        if (count == 0) return Color.WHITE
+        return Color.rgb((rSum / count).toInt(), (gSum / count).toInt(), (bSum / count).toInt())
+    }
+
     private fun compositeOnWhite(bitmap: Bitmap, mask: FloatArray): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
@@ -109,24 +121,13 @@ object ImageProcessor {
         return output
     }
 
-    /**
-     * Simple automatic exposure / contrast / white balance correction
-     * to approximate even, bright studio lighting.
-     *
-     * - Computes average luminance and shifts brightness toward a
-     *   target mid-bright value.
-     * - Slightly boosts contrast and saturation.
-     * - Applies a mild per-channel white balance correction based on
-     *   average channel values (gray-world assumption).
-     */
     private fun autoLightingCorrection(bitmap: Bitmap): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        // Sample for performance on large images
-        val sampleStep = maxOf(1, (width * height) / 50000)
+        val sampleStep = max(1, (width * height) / 50000)
         var rSum = 0L
         var gSum = 0L
         var bSum = 0L
@@ -152,27 +153,22 @@ object ImageProcessor {
         val avgB = bSum.toFloat() / count
         val avgLum = lumSum.toFloat() / count
 
-        // Target brightness for a "studio" look
         val targetLum = 180f
         val brightnessShift = (targetLum - avgLum).coerceIn(-60f, 80f)
 
-        // Gray world white balance: scale each channel so averages match overall gray average
         val grayAvg = (avgR + avgG + avgB) / 3f
         val rGain = (grayAvg / avgR).coerceIn(0.85f, 1.2f)
         val gGain = (grayAvg / avgG).coerceIn(0.85f, 1.2f)
         val bGain = (grayAvg / avgB).coerceIn(0.85f, 1.2f)
 
-        val contrast = 1.12f // mild contrast boost
-        val saturation = 1.08f // mild saturation boost
+        val contrast = 1.12f
+        val saturation = 1.08f
 
-        // Build combined color matrix: white balance gains -> contrast -> brightness
         val cm = ColorMatrix()
 
-        // Saturation matrix
         val satMatrix = ColorMatrix()
         satMatrix.setSaturation(saturation)
 
-        // White balance + contrast + brightness matrix
         val translate = 128f * (1 - contrast) + brightnessShift
         val wbContrastBrightness = ColorMatrix(
             floatArrayOf(
